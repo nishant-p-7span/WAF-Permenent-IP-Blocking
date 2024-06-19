@@ -45,7 +45,7 @@ done
 
 # Commands:
 # chmod +x test.sh
-# ./test.sh https://api.dekisugiproductions.xyz
+# ./test.sh https://domain.com
 
 # test status code from url:
-# curl -s -o /dev/null -w "%{http_code}\n" https://api.dekisugiproductions.xyz
+# curl -s -o /dev/null -w "%{http_code}\n" https://domain.com
