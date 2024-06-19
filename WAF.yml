@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  Scope:
+    Type: String
+    Description: Enter WebACL Scope CLOUDFRONT or REGIONAL
+    AllowedValues: [REGIONAL, CLOUDFRONT]
+  WebACLName:
+    Type: String
+    Description: Enter WebACL name
+  WebACLId:
+    Type: String
+    Description: Enter WebACL ID
+  RateBasedRuleName:
+    Type: String
+    Description: Enter Rate Based Rule name
+
+Resources:
+  IPv4IPset:
+    Type: "AWS::WAFv2::IPSet"
+    Properties:
+      Name: !Join
+      - "-"
+      - - "IPv4-IPset"
+        - !Select
+          - 0
+          - !Split
+            - "-"
+            - !Select
+              - 2
+              - !Split
+                - "/"
+                - !Ref "AWS::StackId"
+      Scope: !Ref Scope
+      Description: "IPv4 IP set for custom rate based block rule"
+      IPAddressVersion: "IPV4"
+      Addresses: []
+
+  CustomRBRLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Join
+      - "-"
+      - - "CustomRBRLambdaFunction"
+        - !Select
+          - 0
+          - !Split
+            - "-"
+            - !Select
+              - 2
+              - !Split
+                - "/"
+                - !Ref "AWS::StackId"
+      Description: Lambda function containing the logic for custom RBR
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.9
+      Environment:
+        Variables:
+          SCOPE: !Ref Scope
+          WEB_ACL_NAME: !Ref WebACLName
+          WEB_ACL_ID: !Ref WebACLId
+          RATE_BASED_RULE_NAME: !Ref RateBasedRuleName
+          IP_SET_ID_CUSTOM_V4: !GetAtt IPv4IPset.Id
+          IP_SET_NAME_CUSTOM_V4: !Select
+                                    - "0"
+                                    - !Split [ "|" , Ref: IPv4IPset]
+
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          import os
+
+          wafv2_client = boto3.client('wafv2')
+
+          def update_custom_ipset(log, new_ipv4_blocked_list):
+              try:
+                  # Fetch the current IPs in the custom IP set
+                  ip_set_id = os.getenv('IP_SET_ID_CUSTOM_V4')
+                  ip_set_name = os.getenv('IP_SET_NAME_CUSTOM_V4')
+                  current_ip_set = wafv2_client.get_ip_set(
+                      Scope=os.getenv('SCOPE'),
+                      Name=ip_set_name,
+                      Id=ip_set_id
+                  )
+                  
+                  current_ipv4_blocked_list = current_ip_set['IPSet']['Addresses']
+                  
+                  # Merge the current IPs with the new IPs
+                  updated_ipv4_blocked_list = list(set(current_ipv4_blocked_list + new_ipv4_blocked_list))
+                  
+                  # Get lock token for updating the IP set
+                  lock_token = current_ip_set['LockToken']
+                  
+                  # Update the IP set with the merged list
+                  update_ip_set(
+                      log, wafv2_client,
+                      ip_set_id,
+                      updated_ipv4_blocked_list,
+                      lock_token,
+                      ip_set_name
+                  )
+              except Exception as e:
+                  log.error("[update_custom_ipset] Error updating custom ipset.")
+                  raise e
+
+          def get_lock_token(log, wafv2_client, ip_set_id, name):
+              try:
+                  response = wafv2_client.get_ip_set(
+                      Scope=os.getenv('SCOPE'),
+                      Name=name,
+                      Id=ip_set_id
+                  )
+                  return response['LockToken']
+              except Exception as e:
+                  log.error(f"Error in get_lock_token: {e}")
+                  raise
+
+          def update_ip_set(log, wafv2_client, ip_set_id, addresses, lock_token, name):
+              try:
+                  wafv2_client.update_ip_set(
+                      Scope=os.getenv('SCOPE'),
+                      Name=name,
+                      Id=ip_set_id,
+                      Addresses=addresses,
+                      LockToken=lock_token
+                  )
+              except Exception as e:
+                  log.error("Error in update_ip_set: {}".format(e))
+                  raise
+
+          def get_rbr_managed_ip_list(log):
+              try:
+                  response = wafv2_client.get_rate_based_statement_managed_keys(
+                      Scope=os.getenv('SCOPE'),
+                      WebACLName=os.getenv('WEB_ACL_NAME'),
+                      WebACLId=os.getenv('WEB_ACL_ID'),
+                      RuleName=os.getenv('RATE_BASED_RULE_NAME')
+                  )
+                  return response
+              except Exception as e:
+                  log.error("[get_rbr_managed_ip_list] Error to get the list of IP blocked by rate based rule")
+                  log.error(e)
+                  raise e
+
+          def lambda_handler(event, context):
+              log = logging.getLogger()
+
+              try:
+                  # Set Log Level
+                  log.setLevel(logging.ERROR)
+
+                  # Get the list of IP blocked by rate based rule
+                  rbr_managed_list = get_rbr_managed_ip_list(log)
+
+                  # Get the list of IPv4 addresses from the rate based rule list
+                  latest_ipv4_blocked_list = rbr_managed_list['ManagedKeysIPV4']['Addresses']
+
+                  # Update latest blocked list to WAF IPset
+                  update_custom_ipset(log, latest_ipv4_blocked_list)
+
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Update Success!')
+                  }
+              except Exception as e:
+                  log.error(e)
+                  return {
+                      'statusCode': 500,
+                      'body': str(e)
+                  }
+
+      Timeout: 10
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+        - id: W89
+          reason: There is no need to run this lambda in a VPC
+        - id: W92
+          reason: There is no need for Reserved Concurrency
+
+  LambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+
+        - Effect: "Allow"
+          Principal:
+            Service:
+              - "lambda.amazonaws.com"
+          Action: "sts:AssumeRole"
+
+      ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Policies:
+          - PolicyName: !Join
+            - "-"
+            - - "LambdaRolePolicy"
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId"
+
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+              - Sid: "WAFIPSetPermissions"
+                Effect: "Allow"
+                Action:
+                - "wafv2:GetIPSet"
+                - "wafv2:UpdateIPSet"
+                Resource:
+                  - !GetAtt IPv4IPset.Arn
+              - Sid: "WAFRBRPermissions"
+                Effect: "Allow"
+                Action: "wafv2:GetRateBasedStatementManagedKeys"
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:wafv2:${AWS::Region}:${AWS::AccountId}:${WebACLSope}/webacl/${WebACLName}/${WebACLId}'
+                  - WebACLSope: !If [IsRegional, "regional", "cloudfront"]
+
+  EventBridgeRule:
+      Type: "AWS::Events::Rule"
+      Properties:
+        Name: !Join
+        - "-"
+        - - "EventBridgeRule"
+          - !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref "AWS::StackId"
+        ScheduleExpression: "rate(1 minute)"
+        State: "ENABLED"
+        Targets:
+          - Id: "CustomRBRLambdaFunction"
+            Arn: !GetAtt CustomRBRLambdaFunction.Arn
+
+  LambdaPermissionForEventBridge:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref CustomRBRLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt EventBridgeRule.Arn
+
+Outputs:
+  IPv4IPsetName:
+    Description: IPv4 IPSet for custom rate based block rule
+    Value: !Select
+              - "0"
+              - !Split [ "|" , Ref: IPv4IPset]
+
+Conditions:
+  IsRegional:
+    !Equals [!Ref Scope, "REGIONAL"]
