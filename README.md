@@ -35,5 +35,5 @@
   - Action: Block
 - Add rule.
 - make it prority top.
-  > Advance: If there is any IPset rule which you are allowing then please make sure it always stays above this rule.
+> Advance: If there are some ip you want to allow at any cost then create `IPset` that contain ip list of that IPs and then create rule with this IPset anf make it priority on the top. This will allow these ips to make request without getting blocked.
 ## all set now. Cloudfromation template and Code can be found in repo.
