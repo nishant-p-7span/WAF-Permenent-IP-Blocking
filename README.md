@@ -45,6 +45,7 @@
 ## `X-Forwarded-For` HTTP header:
 - `X-Forwarded-For` http header used by proxy servers and load balancer, which tells originating IP. It indicates that request is forwarded from which IP.
 - So, We are making changes in our rules.
+- **Normal user making reqest don't have any **
 ## Rate Based Rule changes: 
 - Request aggregation: IP address in header
 - Header field name: `X-Forwarded-For`
